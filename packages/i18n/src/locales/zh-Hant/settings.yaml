@@ -311,8 +311,8 @@ pages:
     consciousness:
       model: 意識 / 模型
     vision:
-      provider: 視覺 / 供應商
-      model: 視覺 / 模型
+      provider: Vision / Provider
+      model: Vision / Model
     created_by: 建立者
     creator_notes: 建立者筆記
     delete: 刪除
@@ -963,6 +963,9 @@ pages:
       chat:
         title: Chat
         description: Text generation model providers. e.g. OpenRouter, OpenAI, Ollama.
+      vision:
+        title: Vision
+        description: Vision model providers for image understanding.
       speech:
         title: Speech
         description: Speech (text-to-speech) model providers. e.g. ElevenLabs, Azure Speech.
@@ -1226,6 +1229,9 @@ pages:
       fireworks:
         description: Fireworks.ai
         title: Fireworks.ai
+      google-gemini-audio-speech:
+        description: aistudio.google.com
+        title: Google Gemini
       microsoft-speech:
         description: speech.microsoft.com
         fields:

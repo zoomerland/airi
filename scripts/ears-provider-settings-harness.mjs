@@ -64,6 +64,7 @@ async function writeHarnessFiles(rootDir, repoRoot) {
   const stageUiProvidersDir = toViteFsPath(resolve(repoRoot, 'packages/stage-ui/src/components/scenarios/providers'))
   const stageUiMiscDir = toViteFsPath(resolve(repoRoot, 'packages/stage-ui/src/components/misc'))
   const uiFormDir = toViteFsPath(resolve(repoRoot, 'packages/ui/src/components/form/field'))
+  const uiLayoutDir = toViteFsPath(resolve(repoRoot, 'packages/ui/src/components/layouts'))
   const uiMiscDir = toViteFsPath(resolve(repoRoot, 'packages/ui/src/components/misc'))
 
   await writeFile(join(rootDir, 'index.html'), `<html>
@@ -168,6 +169,7 @@ export { default as TranscriptionPlayground } from '${stageUiProvidersDir}/trans
 `, 'utf-8')
 
   await writeFile(join(srcDir, 'ui-shim.ts'), `export { default as Button } from '${uiMiscDir}/button.vue'
+export { default as Collapsible } from '${uiLayoutDir}/collapsible.vue'
 export { default as FieldCombobox } from '${uiFormDir}/field-combobox-select.vue'
 export { default as FieldInput } from '${uiFormDir}/field-input.vue'
 export { default as FieldRange } from '${uiFormDir}/field-range.vue'
@@ -225,7 +227,6 @@ function viteConfig(rootDir, repoRoot, vuePlugin, yamlPlugin, stageWebRequire, h
         '@proj-airi/stage-ui-spine': resolve(repoRoot, 'packages/stage-ui-spine/src'),
         '@proj-airi/stage-ui-three': resolve(repoRoot, 'packages/stage-ui-three/src'),
         '@proj-airi/stream-kit': resolve(repoRoot, 'packages/stream-kit/src'),
-        '@proj-airi/ui': resolve(repoRoot, 'packages/ui/src'),
         '@proj-airi/ui-transitions': resolve(repoRoot, 'packages/ui-transitions/src'),
       },
     },

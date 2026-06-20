@@ -75,6 +75,10 @@ const ALIYUN_NLS_REGIONS = [
 
 type AliyunNlsRegion = typeof ALIYUN_NLS_REGIONS[number]
 
+const APP_LOCAL_AUDIO_SPEECH_BASE_URL = 'http://127.0.0.1:8766/v1/'
+const APP_LOCAL_AUDIO_SPEECH_MODEL = 'piper-ru_RU-irina-medium'
+const APP_LOCAL_AUDIO_SPEECH_VOICE = 'ru_RU-irina-medium'
+
 function toListVoicesOptions<T>(provider: VoiceProviderWithExtraOptions<T>, options?: T): ListVoicesOptions {
   const { fetch: _fetch, ...voiceOptions } = provider.voice(options)
   return voiceOptions
@@ -224,6 +228,59 @@ export interface ProviderRuntimeState {
   modelLoadError: string | null
 }
 
+function normalizeProviderBaseUrl(config: Record<string, unknown>, fallback: string): string {
+  const raw = typeof config.baseUrl === 'string' && config.baseUrl.trim()
+    ? config.baseUrl.trim()
+    : fallback
+  return raw.endsWith('/') ? raw : `${raw}/`
+}
+
+async function fetchAppLocalSpeechModels(config: Record<string, unknown>): Promise<ModelInfo[]> {
+  const baseUrl = normalizeProviderBaseUrl(config, APP_LOCAL_AUDIO_SPEECH_BASE_URL)
+  const response = await fetch(new URL('models', baseUrl))
+  if (!response.ok)
+    throw new Error(`Failed to list local speech models: HTTP ${response.status}`)
+
+  const payload = await response.json() as { data?: Array<Record<string, unknown>> }
+  return (payload.data ?? [])
+    .filter(item => typeof item.id === 'string')
+    .map(item => ({
+      id: item.id as string,
+      name: typeof item.name === 'string' ? item.name : item.id as string,
+      provider: 'app-local-audio-speech',
+      description: typeof item.description === 'string' ? item.description : '',
+      deprecated: false,
+    }))
+}
+
+async function fetchAppLocalSpeechVoices(config: Record<string, unknown>): Promise<VoiceInfo[]> {
+  const baseUrl = normalizeProviderBaseUrl(config, APP_LOCAL_AUDIO_SPEECH_BASE_URL)
+  const response = await fetch(new URL('audio/voices', baseUrl))
+  if (!response.ok)
+    throw new Error(`Failed to list local speech voices: HTTP ${response.status}`)
+
+  const payload = await response.json() as { voices?: Array<Record<string, unknown>> }
+  return (payload.voices ?? [])
+    .filter(item => typeof item.id === 'string')
+    .map(item => ({
+      id: item.id as string,
+      name: typeof item.name === 'string' ? item.name : item.id as string,
+      provider: 'app-local-audio-speech',
+      compatibleModels: typeof item.model === 'string' ? [item.model] : [],
+      description: typeof item.description === 'string' ? item.description : '',
+      gender: typeof item.gender === 'string' ? item.gender : undefined,
+      languages: Array.isArray(item.languages)
+        ? item.languages.filter((language): language is { code: string, title: string } =>
+            typeof language === 'object'
+            && language != null
+            && 'code' in language
+            && 'title' in language
+            && typeof language.code === 'string'
+            && typeof language.title === 'string')
+        : [{ code: 'ru-RU', title: 'Russian' }],
+    }))
+}
+
 export const useProvidersStore = defineStore('providers', () => {
   const providerCredentials = useLocalStorage<Record<string, Record<string, unknown>>>('settings/credentials/providers', {})
   const addedProviders = useLocalStorage<Record<string, boolean>>('settings/providers/added', {})
@@ -317,6 +374,17 @@ export const useProvidersStore = defineStore('providers', () => {
       tasks: ['text-to-speech', 'tts'],
       isAvailableBy: isStageTamagotchi,
       creator: createOpenAI,
+      requiresCredentials: false,
+      defaultOptions: () => ({
+        apiKey: '',
+        baseUrl: APP_LOCAL_AUDIO_SPEECH_BASE_URL,
+        model: APP_LOCAL_AUDIO_SPEECH_MODEL,
+        voice: APP_LOCAL_AUDIO_SPEECH_VOICE,
+      }),
+      capabilities: {
+        listModels: fetchAppLocalSpeechModels,
+        listVoices: fetchAppLocalSpeechVoices,
+      },
       validation: [],
       validators: {
         chatPingCheckAvailable: false,

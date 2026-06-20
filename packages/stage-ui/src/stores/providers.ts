@@ -350,7 +350,7 @@ export const useProvidersStore = defineStore('providers', () => {
       creator: createOpenAI,
       defaultOptions: () => ({
         apiKey: '',
-        baseUrl: 'http://127.0.0.1:8765/v1',
+        baseUrl: 'http://127.0.0.1:18765/v1',
         model: 'auto',
       }),
       validation: [],

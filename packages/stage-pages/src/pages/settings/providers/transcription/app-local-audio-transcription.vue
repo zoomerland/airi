@@ -19,7 +19,7 @@ import { storeToRefs } from 'pinia'
 import { computed, onMounted, watch } from 'vue'
 
 const providerId = 'app-local-audio-transcription'
-const defaultBaseUrl = 'http://127.0.0.1:8765/v1'
+const defaultBaseUrl = 'http://127.0.0.1:18765/v1'
 const defaultModel = 'auto'
 
 const hearingStore = useHearingStore()

@@ -39,6 +39,14 @@ export {
   categorizeResponse,
   createStreamingCategorizer,
 } from './runtime/response-categoriser'
+export {
+  validateSpeechOutput,
+} from './runtime/speech-output-contract'
+export type {
+  SpeechOutputContract,
+  SpeechOutputContractFailReason,
+  SpeechOutputValidationResult,
+} from './runtime/speech-output-contract'
 export type {
   CategorizedResponse,
   CategorizedSegment,

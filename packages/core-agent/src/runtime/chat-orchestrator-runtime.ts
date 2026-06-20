@@ -5,6 +5,7 @@ import type { AgentContextPort } from '../contracts/context-port'
 import type { AgentForegroundStreamPort } from '../contracts/stream-port'
 import type { ChatAssistantMessage, ChatHistoryItem, ChatSlices, ChatStreamEventContext, ContextMessage, StreamingAssistantMessage } from '../types/chat'
 import type { StreamEvent, StreamOptions } from '../types/llm'
+import type { SpeechOutputContract, SpeechOutputValidationResult } from './speech-output-contract'
 
 import { createQueue } from '@proj-airi/stream-kit'
 
@@ -13,6 +14,8 @@ import { formatTimePrefix } from '../messages/datetime-prefix'
 import { createChatHooks } from './agent-hooks'
 import { useLlmmarkerParser } from './llm-marker-parser'
 import { categorizeResponse, createStreamingCategorizer } from './response-categoriser'
+import { validateSpeechOutput } from './speech-output-contract'
+import { createSpeechPhraseBuffer } from './speech-phrase-buffer'
 
 const STREAMING_UI_FLUSH_CHUNK_SIZE = 24
 
@@ -174,6 +177,8 @@ export interface ChatOrchestratorRuntimeDeps {
   getActiveProvider: () => string | undefined
   /** Returns optional prompt text appended to the provider system message for this send. */
   getSystemPromptSupplement?: () => string | undefined
+  /** Returns the optional Mouth-facing speech contract for this send. */
+  getSpeechOutputContract?: () => SpeechOutputContract | undefined
   /** Runtime context providers ingested immediately before prompt composition. */
   runtimeContextProviders?: Array<() => ContextMessage | null | undefined>
   /** Clock used for persisted message timestamps. @default Date.now */
@@ -242,6 +247,11 @@ export interface ChatOrchestratorRuntimeDeps {
   onAssistantTurnReady?: (event: {
     messageText: string
     sessionMessages: ChatHistoryItem[]
+  }) => void
+  /** Called when a Mouth-facing phrase is withheld by the speech output contract. */
+  onSpeechOutputContractViolation?: (event: {
+    textPreview: string
+    validation: SpeechOutputValidationResult
   }) => void
 }
 
@@ -463,7 +473,62 @@ export function createChatOrchestratorRuntime(deps: ChatOrchestratorRuntimeDeps)
       })
 
       const categorizer = createStreamingCategorizer(deps.getActiveProvider())
+      const speechOutputContract = deps.getSpeechOutputContract?.()
+      const phraseBuffer = speechOutputContract?.enabled ? createSpeechPhraseBuffer() : undefined
       let streamPosition = 0
+
+      async function emitSpeechText(text: string) {
+        if (!text.trim())
+          return
+
+        buildingMessage.content += text
+
+        await hooks.emitTokenLiteralHooks(text, streamingMessageContext)
+
+        const lastSlice = buildingMessage.slices.at(-1)
+        if (lastSlice?.type === 'text') {
+          lastSlice.text += text
+        }
+        else {
+          buildingMessage.slices.push({
+            type: 'text',
+            text,
+          })
+        }
+        patchForegroundStream(sessionId, buildingMessage)
+      }
+
+      async function emitContractCheckedSpeechText(text: string) {
+        if (!speechOutputContract?.enabled) {
+          await emitSpeechText(text)
+          return
+        }
+
+        const validation = validateSpeechOutput(text, speechOutputContract)
+        if (!validation.ok) {
+          deps.onSpeechOutputContractViolation?.({
+            textPreview: redactSpeechPreview(text),
+            validation,
+          })
+          return
+        }
+
+        await emitSpeechText(text)
+      }
+
+      async function processSpeechOnlyText(text: string) {
+        if (!text.trim())
+          return
+
+        if (!phraseBuffer) {
+          await emitSpeechText(text)
+          return
+        }
+
+        for (const phrase of phraseBuffer.append(text)) {
+          await emitContractCheckedSpeechText(phrase)
+        }
+      }
 
       const parser = useLlmmarkerParser({
         onLiteral: async (literal) => {
@@ -476,21 +541,7 @@ export function createChatOrchestratorRuntime(deps: ChatOrchestratorRuntimeDeps)
           streamPosition += literal.length
 
           if (speechOnly.trim()) {
-            buildingMessage.content += speechOnly
-
-            await hooks.emitTokenLiteralHooks(speechOnly, streamingMessageContext)
-
-            const lastSlice = buildingMessage.slices.at(-1)
-            if (lastSlice?.type === 'text') {
-              lastSlice.text += speechOnly
-            }
-            else {
-              buildingMessage.slices.push({
-                type: 'text',
-                text: speechOnly,
-              })
-            }
-            patchForegroundStream(sessionId, buildingMessage)
+            await processSpeechOnlyText(speechOnly)
           }
         },
         onSpecial: async (special) => {
@@ -678,6 +729,10 @@ export function createChatOrchestratorRuntime(deps: ChatOrchestratorRuntimeDeps)
       })
 
       await parser.end()
+      const pendingSpeech = phraseBuffer?.flush()
+      if (pendingSpeech)
+        await emitContractCheckedSpeechText(pendingSpeech)
+
       deps.onAssistantResponseRendered?.({
         model: options.model,
         latencyMs: Math.round(monotonicNow() - llmRequestStartedAt),
@@ -814,4 +869,12 @@ export function createChatOrchestratorRuntime(deps: ChatOrchestratorRuntimeDeps)
     setSending,
     hooks,
   }
+}
+
+function redactSpeechPreview(text: string): string {
+  const trimmed = text.trim()
+  if (!trimmed)
+    return ''
+
+  return `${trimmed.length} chars`
 }

@@ -348,6 +348,11 @@ export const useProvidersStore = defineStore('providers', () => {
       tasks: ['speech-to-text', 'automatic-speech-recognition', 'asr', 'stt'],
       isAvailableBy: isStageTamagotchi,
       creator: createOpenAI,
+      defaultOptions: () => ({
+        apiKey: '',
+        baseUrl: 'http://127.0.0.1:18765/v1',
+        model: 'auto',
+      }),
       validation: [],
       validators: {
         chatPingCheckAvailable: false,

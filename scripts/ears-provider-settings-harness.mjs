@@ -10,6 +10,7 @@ function parseArgs(argv) {
     host: '127.0.0.1',
     port: 18767,
     smoke: false,
+    requestSmoke: false,
     keepAlive: false,
   }
 
@@ -23,6 +24,10 @@ function parseArgs(argv) {
     }
     else if (arg === '--smoke') {
       args.smoke = true
+    }
+    else if (arg === '--request-smoke') {
+      args.smoke = true
+      args.requestSmoke = true
     }
     else if (arg === '--keep-alive') {
       args.keepAlive = true
@@ -45,6 +50,7 @@ Options:
   --host <host>      Host to bind. Default: 127.0.0.1
   --port <port>      Port to bind. Default: 18767
   --smoke            Run a bounded Playwright smoke and exit.
+  --request-smoke    Run the UI smoke plus a synthetic WAV provider request.
   --keep-alive       Keep the dev-only harness server running.
   --help             Show this help.
 
@@ -85,7 +91,9 @@ import { createPinia } from 'pinia'
 import { createApp } from 'vue'
 import { createI18n } from 'vue-i18n'
 import { createRouter, createWebHistory } from 'vue-router'
+import { generateTranscription } from '@xsai/generate-transcription'
 
+import { useProvidersStore } from '@proj-airi/stage-ui/stores/providers'
 import ProviderPage from '${providerPage}'
 
 const messages = {
@@ -149,6 +157,92 @@ const i18n = createI18n({
   messages,
 })
 
+function createSyntheticSilenceWav(durationSeconds = 0.35, sampleRate = 16000) {
+  const channelCount = 1
+  const bytesPerSample = 2
+  const sampleCount = Math.max(1, Math.floor(durationSeconds * sampleRate))
+  const dataSize = sampleCount * channelCount * bytesPerSample
+  const buffer = new ArrayBuffer(44 + dataSize)
+  const view = new DataView(buffer)
+  let offset = 0
+
+  function writeString(value: string) {
+    for (let i = 0; i < value.length; i++)
+      view.setUint8(offset++, value.charCodeAt(i))
+  }
+
+  writeString('RIFF')
+  view.setUint32(offset, 36 + dataSize, true)
+  offset += 4
+  writeString('WAVE')
+  writeString('fmt ')
+  view.setUint32(offset, 16, true)
+  offset += 4
+  view.setUint16(offset, 1, true)
+  offset += 2
+  view.setUint16(offset, channelCount, true)
+  offset += 2
+  view.setUint32(offset, sampleRate, true)
+  offset += 4
+  view.setUint32(offset, sampleRate * channelCount * bytesPerSample, true)
+  offset += 4
+  view.setUint16(offset, channelCount * bytesPerSample, true)
+  offset += 2
+  view.setUint16(offset, bytesPerSample * 8, true)
+  offset += 2
+  writeString('data')
+  view.setUint32(offset, dataSize, true)
+
+  return new File([buffer], 'airi-ears-synthetic-silence.wav', { type: 'audio/wav' })
+}
+
+async function runSyntheticProviderRequest(options?: { baseUrl?: string, model?: string }) {
+  const providerId = 'app-local-audio-transcription'
+  const providersStore = useProvidersStore()
+  const baseUrl = options?.baseUrl || window.location.origin + '/v1'
+  const model = options?.model || 'cpu'
+
+  providersStore.initializeProvider(providerId)
+  const providerConfig = providersStore.getProviderConfig(providerId)
+  providerConfig.apiKey = ''
+  providerConfig.baseUrl = baseUrl
+  providerConfig.model = model
+  await providersStore.disposeProviderInstance(providerId)
+
+  const provider = await providersStore.getProviderInstance(providerId)
+  const startedAt = performance.now()
+  const response = await generateTranscription({
+    ...provider.transcription(model),
+    file: createSyntheticSilenceWav(),
+    responseFormat: 'json',
+  })
+
+  const text = typeof response.text === 'string' ? response.text : ''
+  return {
+    ok: true,
+    providerId,
+    baseUrl,
+    model,
+    mode: response.mode,
+    latencyMs: Math.round(performance.now() - startedAt),
+    textPresent: text.length > 0,
+    textLength: text.length,
+    responseKeys: Object.keys(response).sort(),
+  }
+}
+
+declare global {
+  interface Window {
+    __AIRI_EARS_HARNESS__?: {
+      runSyntheticProviderRequest: typeof runSyntheticProviderRequest
+    }
+  }
+}
+
+window.__AIRI_EARS_HARNESS__ = {
+  runSyntheticProviderRequest,
+}
+
 createApp({
   template: '<main data-harness-root style="padding: 24px; min-height: 100vh;"><router-view /></main>',
 })
@@ -175,7 +269,7 @@ export { default as FieldInput } from '${uiFormDir}/field-input.vue'
 export { default as FieldRange } from '${uiFormDir}/field-range.vue'
 `, 'utf-8')
 
-  await writeFile(join(srcDir, 'build-time.ts'), `export default ${JSON.stringify(new Date(0).toISOString())}
+  await writeFile(join(srcDir, 'build-time.ts'), `export default new Date(0)
 `, 'utf-8')
 
   await writeFile(join(srcDir, 'build-git.ts'), `export const abbreviatedSha = 'ears-harness'
@@ -193,6 +287,12 @@ function viteConfig(rootDir, repoRoot, vuePlugin, yamlPlugin, stageWebRequire, h
       strictPort: true,
       fs: {
         strict: false,
+      },
+      proxy: {
+        '/v1': {
+          target: 'http://127.0.0.1:18765',
+          changeOrigin: true,
+        },
       },
     },
     define: {
@@ -237,7 +337,7 @@ function viteConfig(rootDir, repoRoot, vuePlugin, yamlPlugin, stageWebRequire, h
   }
 }
 
-async function runSmoke(url, chromium) {
+async function runSmoke(url, chromium, options = {}) {
   const launchAttempts = [
     { headless: true },
     { headless: true, channel: 'msedge' },
@@ -288,14 +388,29 @@ async function runSmoke(url, chromium) {
       }
     })
 
+    let requestResult = null
+    if (options.requestSmoke) {
+      requestResult = await page.evaluate(async () => {
+        const hook = window.__AIRI_EARS_HARNESS__?.runSyntheticProviderRequest
+        if (!hook)
+          throw new Error('AIRI Ears request smoke hook is not available')
+        return await hook({
+          baseUrl: `${window.location.origin}/v1`,
+          model: 'cpu',
+        })
+      })
+    }
+
     return {
       ok: result.modelInput?.value === 'auto'
         && result.baseUrlInput?.value === 'http://127.0.0.1:18765/v1'
         && result.baseUrlInput?.required === true
         && result.playgroundTextPresent === true
-        && result.startMonitoringPresent === true,
+        && result.startMonitoringPresent === true
+        && (!options.requestSmoke || requestResult?.ok === true),
       route: providerRoute,
       ...result,
+      requestSmoke: requestResult,
       consoleErrors: messages,
     }
   }
@@ -332,7 +447,7 @@ async function main() {
 
   try {
     if (args.smoke) {
-      const result = await runSmoke(url, chromium)
+      const result = await runSmoke(url, chromium, { requestSmoke: args.requestSmoke })
       console.log(JSON.stringify(result, null, 2))
       if (!result.ok)
         process.exitCode = 2

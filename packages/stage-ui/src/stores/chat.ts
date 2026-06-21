@@ -19,10 +19,12 @@ import { useChatSessionStore } from './chat/session-store'
 import { useChatStreamStore } from './chat/stream-store'
 import { useContextObservabilityStore } from './devtools/context-observability'
 import { useLLM } from './llm'
+import { resolveLocalBrainSpeechOutputContract } from './chat/speech-output-contract'
 import { useLlmToolsetPromptsStore } from './llm-toolset-prompts'
 import { useAiriCardStore } from './modules/airi-card'
 import { useAutonomousArtistryStore } from './modules/artistry-autonomous'
 import { useConsciousnessStore } from './modules/consciousness'
+import { useProvidersStore } from './providers'
 
 interface ForkOptions {
   fromSessionId?: string
@@ -47,6 +49,7 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
   const llmStore = useLLM()
   const llmToolsetPromptsStore = useLlmToolsetPromptsStore()
   const consciousnessStore = useConsciousnessStore()
+  const providersStore = useProvidersStore()
   const artistryAutonomousStore = useAutonomousArtistryStore()
   const { activeProvider } = storeToRefs(consciousnessStore)
   const {
@@ -157,6 +160,10 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
     getActiveSessionId: () => activeSessionId.value,
     getActiveProvider: () => activeProvider.value,
     getSystemPromptSupplement: () => llmToolsetPromptsStore.activeToolsetPrompt,
+    getSpeechOutputContract: () => resolveLocalBrainSpeechOutputContract({
+      providerId: activeProvider.value,
+      providerConfig: activeProvider.value ? providersStore.getProviderConfig(activeProvider.value) : undefined,
+    }),
     runtimeContextProviders: [
       createMinecraftContext,
     ],
@@ -187,6 +194,15 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
       has_voice: hasVoice,
       model,
     }),
+    onSpeechOutputContractViolation: ({ textPreview, validation }) => {
+      console.warn('[chat-orchestrator] Speech output contract violation', {
+        textPreview,
+        failReasons: validation.failReasons,
+        wordCount: validation.wordCount,
+        charCount: validation.charCount,
+        maxWords: validation.maxWords,
+      })
+    },
     onLifecycle: record => contextObservability.recordLifecycle(record),
     onPromptProjection: payload => contextObservability.capturePromptProjection(payload),
     onUserMessageAppended: ({ sessionId, message, messageText }) => {

@@ -47,8 +47,10 @@ const forkSessionMock = vi.fn()
 const ensureSessionMock = vi.fn()
 
 const activeSessionIdRef = ref('session-1')
+const activeProviderRef = ref('mock-provider')
 const streamingMessageRef = ref<any>({ role: 'assistant', content: '', slices: [], tool_results: [] })
 const sessionMessages: Record<string, any[]> = {}
+const providerConfigs: Record<string, Record<string, unknown> | undefined> = {}
 let currentGeneration = 1
 
 vi.mock('pinia', async () => {
@@ -128,7 +130,13 @@ vi.mock('./llm-toolset-prompts', () => ({
 
 vi.mock('./modules/consciousness', () => ({
   useConsciousnessStore: () => ({
-    activeProvider: ref('mock-provider'),
+    activeProvider: activeProviderRef,
+  }),
+}))
+
+vi.mock('./providers', () => ({
+  useProvidersStore: () => ({
+    getProviderConfig: (providerId: string) => providerConfigs[providerId],
   }),
 }))
 
@@ -165,11 +173,15 @@ describe('chat orchestrator contract', () => {
     ioTracerMocks.spans.length = 0
     ioTracerMocks.startSpanMock.mockClear()
     activeSessionIdRef.value = 'session-1'
+    activeProviderRef.value = 'mock-provider'
     streamingMessageRef.value = { role: 'assistant', content: '', slices: [], tool_results: [] }
     currentGeneration = 1
 
     for (const key of Object.keys(sessionMessages)) {
       delete sessionMessages[key]
+    }
+    for (const key of Object.keys(providerConfigs)) {
+      delete providerConfigs[key]
     }
 
     sessionMessages['session-1'] = [{ role: 'system', content: 'system prompt', createdAt: 1, id: 'system' }]
@@ -303,6 +315,98 @@ describe('chat orchestrator contract', () => {
     expect(specialHook).toHaveBeenCalledWith('<|CALL ["plugin.action"]|>', expect.objectContaining({
       contexts: {},
     }))
+  })
+
+  it('keeps speech output contract disabled by default', async () => {
+    getContextsSnapshotMock.mockReturnValue({})
+    llmStreamMock.mockImplementationOnce(async (_model, _provider, _messages, options) => {
+      await options.onStreamEvent({ type: 'text-delta', text: 'Привет 😊' })
+      await options.onStreamEvent({ type: 'finish', finishReason: 'stop' })
+    })
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const store = useChatOrchestratorStore()
+    const tokenLiteralHook = vi.fn()
+    store.onTokenLiteral(tokenLiteralHook)
+
+    await store.ingest('привет', {
+      model: 'mock-model',
+      chatProvider: provider,
+    })
+
+    expect(tokenLiteralHook).toHaveBeenCalledWith('Привет 😊', expect.anything())
+    expect(warnSpy).not.toHaveBeenCalled()
+    warnSpy.mockRestore()
+  })
+
+  it('enables speech output contract for explicit Ollama opt-in', async () => {
+    activeProviderRef.value = 'ollama'
+    providerConfigs.ollama = {
+      speechOutputContract: {
+        enabled: true,
+      },
+    }
+    getContextsSnapshotMock.mockReturnValue({})
+    llmStreamMock.mockImplementationOnce(async (_model, _provider, _messages, options) => {
+      await options.onStreamEvent({ type: 'text-delta', text: 'Привет 😊' })
+      await options.onStreamEvent({ type: 'finish', finishReason: 'stop' })
+    })
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const store = useChatOrchestratorStore()
+    const tokenLiteralHook = vi.fn()
+    store.onTokenLiteral(tokenLiteralHook)
+
+    try {
+      await store.ingest('привет', {
+        model: 'qwen3:4b-instruct-2507-q4_K_M',
+        chatProvider: provider,
+      })
+
+      expect(tokenLiteralHook).not.toHaveBeenCalled()
+      expect(warnSpy).toHaveBeenCalledWith('[chat-orchestrator] Speech output contract violation', {
+        textPreview: '9 chars',
+        failReasons: expect.arrayContaining(['contains_emoji']),
+        wordCount: 1,
+        charCount: 9,
+        maxWords: 16,
+      })
+    }
+    finally {
+      warnSpy.mockRestore()
+    }
+  })
+
+  it('keeps speech output contract disabled for non-Ollama providers', async () => {
+    activeProviderRef.value = 'lm-studio'
+    providerConfigs['lm-studio'] = {
+      speechOutputContract: {
+        enabled: true,
+      },
+    }
+    getContextsSnapshotMock.mockReturnValue({})
+    llmStreamMock.mockImplementationOnce(async (_model, _provider, _messages, options) => {
+      await options.onStreamEvent({ type: 'text-delta', text: 'Привет 😊' })
+      await options.onStreamEvent({ type: 'finish', finishReason: 'stop' })
+    })
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const store = useChatOrchestratorStore()
+    const tokenLiteralHook = vi.fn()
+    store.onTokenLiteral(tokenLiteralHook)
+
+    try {
+      await store.ingest('привет', {
+        model: 'mock-model',
+        chatProvider: provider,
+      })
+
+      expect(tokenLiteralHook).toHaveBeenCalledWith('Привет 😊', expect.anything())
+      expect(warnSpy).not.toHaveBeenCalled()
+    }
+    finally {
+      warnSpy.mockRestore()
+    }
   })
 
   /**

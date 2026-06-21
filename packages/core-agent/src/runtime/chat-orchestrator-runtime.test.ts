@@ -3,6 +3,7 @@ import type { Message } from '@xsai/shared-chat'
 
 import type { ChatHistoryItem, ContextMessage, StreamingAssistantMessage } from '../types/chat'
 import type { StreamEvent } from '../types/llm'
+import type { SpeechOutputContract } from './speech-output-contract'
 
 import { ContextUpdateStrategy } from '@proj-airi/server-shared/types'
 import { describe, expect, it, vi } from 'vitest'
@@ -34,6 +35,7 @@ function createHarness() {
   const userTurns: unknown[] = []
   const assistantTurns: unknown[] = []
   const stateChanges: unknown[] = []
+  const speechOutputContractViolations: unknown[] = []
   const telemetry = {
     messageSendStarted: [] as unknown[],
     llmRequestStarted: [] as unknown[],
@@ -49,6 +51,7 @@ function createHarness() {
   })
   const ids = ['stream-context', 'assistant-id', 'user-id', 'fallback-id']
   let systemPromptSupplement: string | undefined
+  let speechOutputContract: SpeechOutputContract | undefined
   let nowValue = new Date(2026, 3, 25, 18, 47).getTime()
   let monotonicNowValues = [1000]
   let generation = 1
@@ -79,6 +82,7 @@ function createHarness() {
     getActiveSessionId: () => 'session-1',
     getActiveProvider: () => 'mock-provider',
     getSystemPromptSupplement: () => systemPromptSupplement,
+    getSpeechOutputContract: () => speechOutputContract,
     now: () => nowValue,
     monotonicNow: () => monotonicNowValues.shift() ?? 1000,
     createId: () => ids.shift() ?? 'generated-id',
@@ -88,6 +92,7 @@ function createHarness() {
     onAssistantMessageAppended: event => assistantAppended.push(event),
     onUserTurnReady: event => userTurns.push(event),
     onAssistantTurnReady: event => assistantTurns.push(event),
+    onSpeechOutputContractViolation: event => speechOutputContractViolations.push(event),
     onStateChange: state => stateChanges.push(state),
     onMessageSendStarted: event => telemetry.messageSendStarted.push(event),
     onLlmRequestStarted: event => telemetry.llmRequestStarted.push(event),
@@ -123,6 +128,15 @@ function createHarness() {
     sessionMessages,
     stateChanges,
     stream,
+    speechOutputContract: {
+      enable: (maxWords?: number) => {
+        speechOutputContract = { enabled: true, maxWords }
+      },
+      disable: () => {
+        speechOutputContract = undefined
+      },
+    },
+    speechOutputContractViolations,
     systemPromptSupplement: {
       set: (next: string | undefined) => {
         systemPromptSupplement = next
@@ -559,5 +573,73 @@ describe('createChatOrchestratorRuntime', () => {
     ])
     expect(harness.assistantAppended).toHaveLength(1)
     expect(harness.foregroundResets).toHaveLength(1)
+  })
+
+  it('buffers safe Russian speech until a phrase boundary before emitting token literals', async () => {
+    const harness = createHarness()
+    const tokenLiteralHook = vi.fn()
+    harness.speechOutputContract.enable()
+    harness.runtime.hooks.onTokenLiteral(tokenLiteralHook)
+    harness.stream.mockImplementationOnce(async (_model, _chatProvider, _messages, options) => {
+      await options?.onStreamEvent?.({ type: 'text-delta', text: 'Давай сегодня' })
+      await options?.onStreamEvent?.({ type: 'text-delta', text: ' без сложных задач.' })
+      await options?.onStreamEvent?.({ type: 'finish', finishReason: 'stop' })
+    })
+
+    await harness.runtime.ingest('привет', {
+      model: 'qwen3:4b-instruct-2507-q4_K_M',
+      chatProvider: provider,
+    })
+
+    expect(tokenLiteralHook).toHaveBeenCalledTimes(1)
+    expect(tokenLiteralHook.mock.calls[0]?.[0]).toBe('Давай сегодня без сложных задач.')
+    expect(harness.speechOutputContractViolations).toEqual([])
+  })
+
+  it('withholds unsafe speech before token literal hooks', async () => {
+    const harness = createHarness()
+    const tokenLiteralHook = vi.fn()
+    harness.speechOutputContract.enable()
+    harness.runtime.hooks.onTokenLiteral(tokenLiteralHook)
+    harness.stream.mockImplementationOnce(async (_model, _chatProvider, _messages, options) => {
+      await options?.onStreamEvent?.({ type: 'text-delta', text: 'Привет 😊' })
+      await options?.onStreamEvent?.({ type: 'finish', finishReason: 'stop' })
+    })
+
+    await harness.runtime.ingest('привет', {
+      model: 'qwen3:4b-instruct-2507-q4_K_M',
+      chatProvider: provider,
+    })
+
+    expect(tokenLiteralHook).not.toHaveBeenCalled()
+    expect(harness.speechOutputContractViolations).toEqual([
+      expect.objectContaining({
+        textPreview: '9 chars',
+        validation: expect.objectContaining({
+          failReasons: expect.arrayContaining(['contains_emoji']),
+        }),
+      }),
+    ])
+  })
+
+  it('keeps reasoning tag filtering before speech contract validation', async () => {
+    const harness = createHarness()
+    const tokenLiteralHook = vi.fn()
+    harness.speechOutputContract.enable()
+    harness.runtime.hooks.onTokenLiteral(tokenLiteralHook)
+    harness.stream.mockImplementationOnce(async (_model, _chatProvider, _messages, options) => {
+      await options?.onStreamEvent?.({ type: 'text-delta', text: '<think>секрет</think>' })
+      await options?.onStreamEvent?.({ type: 'text-delta', text: 'Давай без сложных задач.' })
+      await options?.onStreamEvent?.({ type: 'finish', finishReason: 'stop' })
+    })
+
+    await harness.runtime.ingest('привет', {
+      model: 'qwen3:4b-instruct-2507-q4_K_M',
+      chatProvider: provider,
+    })
+
+    expect(tokenLiteralHook).toHaveBeenCalledTimes(1)
+    expect(tokenLiteralHook.mock.calls[0]?.[0]).toBe('Давай без сложных задач.')
+    expect(harness.speechOutputContractViolations).toEqual([])
   })
 })
